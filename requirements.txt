@@ -1,0 +1,27 @@
+# Core dependencies for DL File Prefetcher
+numpy>=1.21.0
+pandas>=1.3.0
+pyyaml>=5.4.0
+# sqlite3 is built into Python stdlib
+
+# eBPF tracing (requires Linux)
+# Note: bcc-python should be installed via system packages:
+# Ubuntu/Debian: sudo apt-get install python3-bpfcc
+# For pip fallback, use the available version:
+# bcc-python>=0.0.2
+
+# ML components
+torch>=1.10.0
+torchvision>=0.11.0
+
+# Data processing
+scikit-learn>=0.24.0
+
+# Testing and benchmarking
+psutil>=5.8.0
+matplotlib>=3.4.0
+
+# Utilities
+argparse
+typing-extensions>=4.0.0
+
