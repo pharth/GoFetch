@@ -1,0 +1,18 @@
+storage:
+  db_path: "traces.db"
+
+prefetcher:
+  # CHANGE THIS to "heap" or "fifo" to switch implementations
+  policy_type: "heap" 
+  
+  confidence_threshold: 0.6
+  rate_limit_per_sec: 20
+  top_k_predictions: 5
+  max_prefetch_size_mb: 16
+
+predictor:
+  baseline:
+    enabled: true
+  ml:
+    enabled: false
+    model_path: "models/prefetch_gru.pt"

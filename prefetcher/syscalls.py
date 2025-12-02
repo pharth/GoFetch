@@ -5,6 +5,7 @@ import ctypes
 import errno
 from typing import Optional
 from pathlib import Path
+import sys
 
 
 # Linux-specific: might need adjustment for different platforms
@@ -83,24 +84,30 @@ def readahead_syscall(fd: int, offset: int, count: int) -> int:
 
 def advise_file(file_path: str, offset: int = 0, length: int = 16 * 1024 * 1024) -> bool:
     """
-    Issue posix_fadvise for a file path.
-    
-    Args:
-        file_path: Path to file
-        offset: Offset in bytes
-        length: Length in bytes (default 16MB)
-    
-    Returns:
-        True on success, False on failure
+    Issue posix_fadvise for a file path (Linux) or simulate it (Windows).
     """
     if not os.path.exists(file_path):
         return False
-    
+
+    # --- Windows Fallback ---
+    if os.name == 'nt':
+        # Windows doesn't have posix_fadvise. 
+        # We simulate a "prefetch" by doing a tiny 1-byte read 
+        # which triggers the OS to cache the file metadata and first page.
+        try:
+            with open(file_path, 'rb') as f:
+                f.seek(offset)
+                f.read(1)
+            return True
+        except Exception:
+            return False
+
+    # --- Linux Implementation ---
     try:
         fd = os.open(file_path, os.O_RDONLY)
-        result = posix_fadvise(fd, offset, length, POSIX_FADV_WILLNEED)
+        ret = posix_fadvise(fd, offset, length, POSIX_FADV_WILLNEED)
         os.close(fd)
-        return result == 0
+        return ret == 0
     except Exception as e:
         print(f"Failed to advise file {file_path}: {e}")
         return False
