@@ -12,29 +12,26 @@ sys.path.insert(0, str(PathLib(__file__).parent.parent))
 
 # Enable prefetcher hooks
 from collector.dataloader_hook import enable_hook
-enable_hook("training_traces.db")
+enable_hook("traces.db")
 
 
 class SimpleImageDataset(Dataset):
-    """Simple dataset for demonstration - uses dummy data if no images available."""
+    """Simple dataset that creates dummy files on the fly to test prefetching."""
     
     def __init__(self, data_dir: str):
         self.data_dir = Path(data_dir)
+        self.data_dir.mkdir(exist_ok=True) # Ensure dir exists
         
         # Try to find image files
-        if self.data_dir.exists():
-            self.image_files = sorted(list(self.data_dir.glob("*.jpg")))[:100]  # First 100 images
-        else:
-            self.image_files = []
+        self.image_files = sorted(list(self.data_dir.glob("*.jpg")))[:100]
         
-        # If no images found, create dummy data
         if len(self.image_files) == 0:
-            print(f"No images found in {data_dir}, using dummy data instead")
+            print(f"No images found in {data_dir}, using dummy file mode")
             self.use_dummy = True
-            self.num_samples = 100  # Create 100 dummy samples
+            self.num_samples = 100
         else:
             self.use_dummy = False
-            print(f"Found {len(self.image_files)} images in {data_dir}")
+            print(f"Found {len(self.image_files)} images")
     
     def __len__(self):
         if self.use_dummy:
@@ -43,16 +40,26 @@ class SimpleImageDataset(Dataset):
     
     def __getitem__(self, idx):
         if self.use_dummy:
-            # Create dummy image tensor (3 channels, 224x224)
-            image = torch.randn(3, 224, 224)
-            return image, 0
-        
-        # This will be automatically traced by the DataLoader hook
+            # 1. GENERATE A DUMMY FILE PATH
+            # We use absolute path so the tracer captures the full location
+            dummy_path = self.data_dir / f"sample_{idx}.bin"
+            
+            # 2. CREATE IT IF MISSING (Simulate the file existing on disk)
+            if not dummy_path.exists():
+                with open(dummy_path, 'wb') as f:
+                    f.write(b'\0' * 1024) # Write 1KB of zeros
+            
+            # 3. OPEN IT (This triggers the DataLoaderHook!)
+            with open(dummy_path, 'rb') as f:
+                _ = f.read()
+                
+            # Return dummy tensor
+            return torch.randn(3, 224, 224), 0
+
         image_path = self.image_files[idx]
         from PIL import Image
         image = Image.open(image_path).convert('RGB')
         
-        # Simulate processing
         import torchvision.transforms as transforms
         transform = transforms.Compose([
             transforms.Resize((224, 224)),
@@ -60,7 +67,7 @@ class SimpleImageDataset(Dataset):
         ])
         
         image = transform(image)
-        return image, 0  # dummy label
+        return image, 0
 
 
 def main():
@@ -69,7 +76,7 @@ def main():
     dataloader = DataLoader(dataset, batch_size=8, num_workers=2, shuffle=True)
     
     print("Starting training...")
-    print("(File accesses will be traced and stored in training_traces.db)")
+    print("(File accesses will be traced and stored in traces.db)")
     
     for epoch in range(3):
         print(f"\nEpoch {epoch + 1}/3")
@@ -82,9 +89,9 @@ def main():
         print(f"  Epoch {epoch + 1} complete")
     
     print("\nTraining complete!")
-    print("Traces saved to: training_traces.db")
+    print("Traces saved to: traces.db")
     print("\nNext steps:")
-    print("1. Train predictor: python -m predictor.train --db training_traces.db")
+    print("1. Train predictor: python -m predictor.train --db traces.db")
     print("2. Start prefetcher: python -m prefetcher.daemon --config config.yaml")
     print("3. Run training again to see speedup")
 

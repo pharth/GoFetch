@@ -10,58 +10,46 @@ from utils.config import Config
 from utils.metrics import MetricsCollector
 from predictor.inference import HybridPredictor
 from prefetcher.syscalls import advise_file
-from prefetcher.policy import PrefetchPolicy
+from prefetcher.policy import PolicyFactory
 from storage.trace_db import TraceDatabase
-from collector.trace_schema import TraceEvent
-
 
 class PrefetchDaemon:
-    """Main daemon for intelligent file prefetching."""
-    
     def __init__(self, config: Config):
         self.config = config
         self.running = False
         
-        # Initialize components
         self.db = TraceDatabase(config.get('storage.db_path', 'traces.db'))
-        
-        # Initialize predictor
-        baseline_model = config.get('predictor.baseline.enabled', True)
-        ml_enabled = config.get('predictor.ml.enabled', False)
         
         self.predictor = HybridPredictor(
             db_path=config.get('storage.db_path', 'traces.db'),
             baseline_model_path='models/baseline.json',
             ml_model_path=config.get('predictor.ml.model_path', 'models/prefetch_gru.pt'),
-            use_ml=ml_enabled
+            use_ml=config.get('predictor.ml.enabled', False)
         )
         
-        # Initialize policy
-        self.policy = PrefetchPolicy(
-            confidence_threshold=config.get('prefetcher.confidence_threshold', 0.7),
-            rate_limit_per_sec=config.get('prefetcher.rate_limit_per_sec', 10),
+        policy_type = config.get('prefetcher.policy_type', 'fifo')
+        print(f"Initializing Policy Engine: {policy_type.upper()}")
+
+        self.policy = PolicyFactory.get_policy(
+            policy_type,
+            confidence_threshold=config.get('prefetcher.confidence_threshold', 0.6), # Lowered slightly for demo
+            rate_limit_per_sec=config.get('prefetcher.rate_limit_per_sec', 20),
             max_prefetch_size_mb=config.get('prefetcher.max_prefetch_size_mb', 16)
         )
         
-        # Initialize metrics
-        metrics_enabled = config.get('metrics.enabled', True)
-        metrics_file = config.get('metrics.output_file', 'metrics.csv') if metrics_enabled else None
-        self.metrics = MetricsCollector(output_file=metrics_file)
-        
-        # Daemon state
+        self.metrics = MetricsCollector(output_file='metrics.csv')
         self.last_poll_time_ns = None
-        self.prefetch_interval = 0.1  # 100ms
+        self.prefetch_interval = 0.1
         self.top_k = config.get('prefetcher.top_k_predictions', 5)
-    
+        
+        # MEMORY OF WHAT WE PREFETCHED
+        # Key: file_path, Value: timestamp
+        self.prefetched_cache = {} 
+        
     def start(self):
-        """Start the daemon."""
         self.running = True
         print("Starting prefetch daemon...")
-        print(f"  Confidence threshold: {self.policy.confidence_threshold}")
-        print(f"  Rate limit: {self.policy.rate_limit_per_sec} ops/sec")
-        print(f"  Top-K predictions: {self.top_k}")
         
-        # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
         
@@ -73,110 +61,95 @@ class PrefetchDaemon:
             self.stop()
     
     def _run_loop(self):
-        """Main daemon loop."""
         iteration = 0
-        
         while self.running:
-            start_time = time.time()
+            loop_start = time.time()
             
-            # Poll for new traces
+            # 1. Poll for new traces
             traces = self.db.get_recent(since_ns=self.last_poll_time_ns)
             
             if traces:
                 print(f"Processing {len(traces)} new traces...")
-                self._process_traces(traces)
+                self._process_traces_and_check_hits(traces)
                 self.last_poll_time_ns = traces[-1].timestamp
             else:
-                # Still update predictor to maintain state
                 self.predictor.update_from_db(since_ns=self.last_poll_time_ns)
             
-            # Get active workers
+            # 2. Push Predictions
             active_workers = self.predictor.get_active_workers()
+            for worker_id in active_workers:
+                predict_start = time.time()
+                predictions = self.predictor.predict(worker_id, top_k=self.top_k)
+                latency = (time.time() - predict_start) * 1000
+                self.metrics.record_prediction(latency)
+                
+                for file_path, confidence in predictions:
+                    self.policy.push(file_path, confidence)
+
+            # 3. Pop Batch and Execute
+            batch = self.policy.pop_batch(batch_size=5)
             
-            # Make predictions and prefetch
-            if active_workers and not self.policy.is_rate_limited():
-                self._prefetch_for_workers(active_workers)
+            for file_path in batch:
+                if advise_file(file_path):
+                    print(f"[{'HEAP' if 'Heap' in self.policy.__class__.__name__ else 'FIFO'}] Prefetching: {file_path}")
+                    self.metrics.record_prefetch(1)
+                    
+                    # Store in our "Short Term Memory" to verify hits later
+                    self.prefetched_cache[file_path] = time.time()
             
             # Flush metrics
             if iteration % 10 == 0:
                 self.metrics.flush()
+                self._cleanup_cache() # Remove old entries from memory
             
-            # Sleep to limit CPU usage
-            elapsed = time.time() - start_time
+            # Sleep
+            elapsed = time.time() - loop_start
             sleep_time = max(0, self.prefetch_interval - elapsed)
             if sleep_time > 0:
                 time.sleep(sleep_time)
             
             iteration += 1
     
-    def _process_traces(self, traces: list):
-        """Process trace events and update predictor state."""
+    def _process_traces_and_check_hits(self, traces: list):
+        """Update predictor AND check if our previous prefetches were useful."""
+        current_time = time.time()
+        
         for trace in traces:
+            # 1. Update Predictor
             self.predictor.observe_trace(trace)
             
-            # Record in metrics
-            # (could track cache hits/misses here if we detect them)
-    
-    def _prefetch_for_workers(self, worker_ids: list):
-        """Generate predictions and prefetch for active workers."""
-        total_prefetched = 0
-        
-        for worker_id in worker_ids:
-            try:
-                # Get predictions
-                predictions = self.predictor.predict(worker_id, top_k=self.top_k)
-                
-                # Apply policy filters
-                filtered = self.policy.filter_predictions(predictions)
-                
-                # Issue prefetch requests
-                for file_path, confidence in filtered:
-                    if advise_file(file_path, offset=0, length=self.policy.get_prefetch_size(file_path)):
-                        self.policy.record_prefetch(file_path)
-                        total_prefetched += 1
-                        
-                        # Check rate limit
-                        if self.policy.is_rate_limited():
-                            break
-            except Exception as e:
-                print(f"Error prefetching for worker {worker_id}: {e}")
-        
-        if total_prefetched > 0:
-            self.metrics.record_prefetch(total_prefetched)
-            print(f"Prefetched {total_prefetched} files")
+            # 2. Check Hit/Miss
+            # If we prefetched this file recently (e.g., last 10 seconds), it's a HIT
+            if trace.file_path in self.prefetched_cache:
+                self.metrics.record_hit()
+                # print(f"  -> Cache HIT! {trace.file_path}")
+            else:
+                self.metrics.record_miss()
+
+    def _cleanup_cache(self):
+        """Remove prefetches older than 30 seconds from memory."""
+        now = time.time()
+        expired = [k for k, v in self.prefetched_cache.items() if now - v > 30]
+        for k in expired:
+            del self.prefetched_cache[k]
     
     def _signal_handler(self, signum, frame):
-        """Handle shutdown signals."""
-        print(f"\nReceived signal {signum}, shutting down...")
         self.running = False
     
     def stop(self):
-        """Stop the daemon and cleanup."""
         self.running = False
-        self.metrics.flush()
         self.metrics.close()
         self.predictor.close()
         self.db.close()
         print("Daemon stopped.")
 
-
 def main():
-    """Main entry point for daemon."""
     parser = argparse.ArgumentParser(description="DL File Prefetcher Daemon")
     parser.add_argument("--config", default="config.yaml", help="Configuration file")
-    parser.add_argument("--confidence", type=float, help="Confidence threshold")
-    parser.add_argument("--rate-limit", type=int, help="Rate limit per second")
-    
     args = parser.parse_args()
-    
-    # Load configuration
     config = Config.from_args(args)
-    
-    # Create and start daemon
     daemon = PrefetchDaemon(config)
     daemon.start()
 
-
 if __name__ == "__main__":
     main()
-
