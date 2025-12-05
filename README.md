@@ -2,9 +2,6 @@
 
 A smart file prefetching system for deep learning workloads that predicts and pre-loads data files into memory before they're needed, reducing I/O bottlenecks during model training.
 
-![Python](https://img. shields.io/badge/Python-3.8%2B-blue)
-![License](https://img. shields.io/badge/License-MIT-green)
-
 ## 📖 Overview
 
 **GoFetch** is an intelligent prefetching daemon designed to accelerate deep learning training pipelines.  It learns file access patterns during training and proactively loads files into the kernel page cache, minimizing disk I/O wait times.
