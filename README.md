@@ -126,10 +126,3 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 - See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed system design
 - Check the `examples/` directory for sample usage
 
-## 📄 License
-
-This project is open source and available under the [MIT License](LICENSE). 
-
----
-
-Made with ❤️ for faster deep learning training
